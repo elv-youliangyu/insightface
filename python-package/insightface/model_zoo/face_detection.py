@@ -316,11 +316,12 @@ class FaceDetector:
         index_list = []
         det_list = []
         landmarks_list_ret = []
-        for img_idx, img in enumerate(imgs):
+        imgs = [cv2.resize(img, self.default_image_size, interpolation=cv2.INTER_LINEAR)
+                   for img in imgs]
+        for img_idx, im in enumerate(imgs):
             proposals_list = []
             scores_list = []
             landmarks_list = []
-            im = cv2.resize(img, self.default_image_size, interpolation=cv2.INTER_LINEAR)
             #if scale == 1.0:
             #    im = img
             #else:
@@ -332,8 +333,11 @@ class FaceDetector:
             #                    interpolation=cv2.INTER_LINEAR)
             im_info = [im.shape[0], im.shape[1]]
             im_tensor = np.zeros((1, 3, im.shape[0], im.shape[1]))
+
+            ## Reverting channels
             for i in range(3):
                 im_tensor[0, i, :, :] = im[:, :, 2 - i]
+
             data = nd.array(im_tensor)
             db = mx.io.DataBatch(data=(data, ),
                                  provide_data=[('data', data.shape)])
@@ -432,7 +436,7 @@ class FaceDetector:
         for i, d, l in zip(index_list, det_list, landmarks_list_ret):
             if i != []:
                 ret.append((i, d, l))
-        return ret
+        return ret, imgs
 
     def nms(self, dets):
         thresh = self.nms_threshold
