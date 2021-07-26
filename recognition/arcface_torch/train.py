@@ -1,7 +1,6 @@
 import argparse
 import logging
 import os
-import time
 
 import torch
 import torch.distributed as dist
@@ -11,64 +10,57 @@ from torch.nn.utils import clip_grad_norm_
 
 import losses
 from backbones import get_model
-from config import config as cfg
-from dataset import MXFaceDataset, DataLoaderX
+from dataset import MXFaceDataset, SyntheticDataset, DataLoaderX
 from partial_fc import PartialFC
 from utils.utils_amp import MaxClipGradScaler
 from utils.utils_callbacks import CallBackVerification, CallBackLogging, CallBackModelCheckpoint
+from utils.utils_config import get_config
 from utils.utils_logging import AverageMeter, init_logging
 
 
 def main(args):
+    cfg = get_config(args.config)
     try:
         world_size = int(os.environ['WORLD_SIZE'])
         rank = int(os.environ['RANK'])
-        dist_url = "tcp://{}:{}".format(os.environ["MASTER_ADDR"], os.environ["MASTER_PORT"])
+        dist.init_process_group('nccl')
     except KeyError:
         world_size = 1
         rank = 0
-        dist_url = "tcp://127.0.0.1:12584"
+        dist.init_process_group(backend='nccl', init_method="tcp://127.0.0.1:12584", rank=rank, world_size=world_size)
 
-    dist.init_process_group(backend='nccl', init_method=dist_url, rank=rank, world_size=world_size)
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
+    os.makedirs(cfg.output, exist_ok=True)
+    init_logging(rank, cfg.output)
 
-    if not os.path.exists(cfg.output) and rank is 0:
-        os.makedirs(cfg.output)
+    if cfg.rec == "synthetic":
+        train_set = SyntheticDataset(local_rank=local_rank)
     else:
-        time.sleep(2)
+        train_set = MXFaceDataset(root_dir=cfg.rec, local_rank=local_rank)
 
-    log_root = logging.getLogger()
-    init_logging(log_root, rank, cfg.output)
-    train_set = MXFaceDataset(root_dir=cfg.rec, local_rank=local_rank)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(
-        train_set, shuffle=True)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_set, shuffle=True)
     train_loader = DataLoaderX(
         local_rank=local_rank, dataset=train_set, batch_size=cfg.batch_size,
         sampler=train_sampler, num_workers=2, pin_memory=True, drop_last=True)
+    backbone = get_model(cfg.network, dropout=0.0, fp16=cfg.fp16, num_features=cfg.embedding_size).to(local_rank)
 
-    dropout = 0.4 if cfg.dataset == "webface" else 0
-    backbone = get_model(args.network, dropout=dropout, fp16=cfg.fp16, num_features=cfg.embedding_size).to(local_rank)
-    backbone_onnx = get_model(args.network, dropout=dropout, fp16=False, num_features=cfg.embedding_size)
-
-    if args.resume:
+    if cfg.resume:
         try:
             backbone_pth = os.path.join(cfg.output, "backbone.pth")
             backbone.load_state_dict(torch.load(backbone_pth, map_location=torch.device(local_rank)))
-            if rank is 0:
+            if rank == 0:
                 logging.info("backbone resume successfully!")
         except (FileNotFoundError, KeyError, IndexError, RuntimeError):
-            logging.info("resume fail, backbone init successfully!")
+            if rank == 0:
+                logging.info("resume fail, backbone init successfully!")
 
-    for ps in backbone.parameters():
-        dist.broadcast(ps, 0)
     backbone = torch.nn.parallel.DistributedDataParallel(
         module=backbone, broadcast_buffers=False, device_ids=[local_rank])
     backbone.train()
-
-    margin_softmax = losses.get_loss(args.loss)
+    margin_softmax = losses.get_loss(cfg.loss)
     module_partial_fc = PartialFC(
-        rank=rank, local_rank=local_rank, world_size=world_size, resume=args.resume,
+        rank=rank, local_rank=local_rank, world_size=world_size, resume=cfg.resume,
         batch_size=cfg.batch_size, margin_softmax=margin_softmax, num_classes=cfg.num_classes,
         sample_rate=cfg.sample_rate, embedding_size=cfg.embedding_size, prefix=cfg.output)
 
@@ -81,20 +73,34 @@ def main(args):
         lr=cfg.lr / 512 * cfg.batch_size * world_size,
         momentum=0.9, weight_decay=cfg.weight_decay)
 
+    num_image = len(train_set)
+    total_batch_size = cfg.batch_size * world_size
+    cfg.warmup_step = num_image // total_batch_size * cfg.warmup_epoch
+    cfg.total_step = num_image // total_batch_size * cfg.num_epoch
+
+    def lr_step_func(current_step):
+        cfg.decay_step = [x * num_image // total_batch_size for x in cfg.decay_epoch]
+        if current_step < cfg.warmup_step:
+            return current_step / cfg.warmup_step
+        else:
+            return 0.1 ** len([m for m in cfg.decay_step if m <= current_step])
+
     scheduler_backbone = torch.optim.lr_scheduler.LambdaLR(
-        optimizer=opt_backbone, lr_lambda=cfg.lr_func)
+        optimizer=opt_backbone, lr_lambda=lr_step_func)
     scheduler_pfc = torch.optim.lr_scheduler.LambdaLR(
-        optimizer=opt_pfc, lr_lambda=cfg.lr_func)
+        optimizer=opt_pfc, lr_lambda=lr_step_func)
 
-    start_epoch = 0
-    total_step = int(len(train_set) / cfg.batch_size / world_size * cfg.num_epoch)
-    if rank is 0: logging.info("Total Step is: %d" % total_step)
+    for key, value in cfg.items():
+        num_space = 25 - len(key)
+        logging.info(": " + key + " " * num_space + str(value))
 
-    callback_verification = CallBackVerification(2000, rank, cfg.val_targets, cfg.rec)
-    callback_logging = CallBackLogging(50, rank, total_step, cfg.batch_size, world_size, None)
+    val_target = cfg.val_targets
+    callback_verification = CallBackVerification(2000, rank, val_target, cfg.rec)
+    callback_logging = CallBackLogging(50, rank, cfg.total_step, cfg.batch_size, world_size, None)
     callback_checkpoint = CallBackModelCheckpoint(rank, cfg.output)
 
     loss = AverageMeter()
+    start_epoch = 0
     global_step = 0
     grad_amp = MaxClipGradScaler(cfg.batch_size, 128 * cfg.batch_size, growth_interval=100) if cfg.fp16 else None
     for epoch in range(start_epoch, cfg.num_epoch):
@@ -119,20 +125,17 @@ def main(args):
             opt_backbone.zero_grad()
             opt_pfc.zero_grad()
             loss.update(loss_v, 1)
-            callback_logging(global_step, loss, epoch, cfg.fp16, grad_amp)
+            callback_logging(global_step, loss, epoch, cfg.fp16, scheduler_backbone.get_last_lr()[0], grad_amp)
             callback_verification(global_step, backbone)
-        callback_checkpoint(global_step, backbone, module_partial_fc, backbone_onnx)
-        scheduler_backbone.step()
-        scheduler_pfc.step()
+            scheduler_backbone.step()
+            scheduler_pfc.step()
+        callback_checkpoint(global_step, backbone, module_partial_fc)
     dist.destroy_process_group()
 
 
 if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     parser = argparse.ArgumentParser(description='PyTorch ArcFace Training')
+    parser.add_argument('config', type=str, help='py config file')
     parser.add_argument('--local_rank', type=int, default=0, help='local_rank')
-    parser.add_argument('--network', type=str, default='r50', help='backbone network')
-    parser.add_argument('--loss', type=str, default='arcface', help='loss function')
-    parser.add_argument('--resume', type=int, default=0, help='model resuming')
-    args_ = parser.parse_args()
-    main(args_)
+    main(parser.parse_args())

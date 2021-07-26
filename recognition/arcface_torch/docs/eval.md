@@ -1,4 +1,4 @@
-## IFRT
+## Eval on ICCV2021-MFR
 
 coming soon.
 
@@ -24,3 +24,8 @@ CUDA_VISIBLE_DEVICES=0,1 python eval_ijbc.py \
 --network iresnet50
 ```
 
+## Inference
+
+```shell
+python inference.py --weight ms1mv3_arcface_r50/backbone.pth --network r50
+```

@@ -39,6 +39,7 @@ class BackgroundGenerator(threading.Thread):
 
 
 class DataLoaderX(DataLoader):
+
     def __init__(self, local_rank, **kwargs):
         super(DataLoaderX, self).__init__(**kwargs)
         self.stream = torch.cuda.Stream(local_rank)
@@ -56,8 +57,7 @@ class DataLoaderX(DataLoader):
             return None
         with torch.cuda.stream(self.stream):
             for k in range(len(self.batch)):
-                self.batch[k] = self.batch[k].to(device=self.local_rank,
-                                                 non_blocking=True)
+                self.batch[k] = self.batch[k].to(device=self.local_rank, non_blocking=True)
 
     def __next__(self):
         torch.cuda.current_stream().wait_stream(self.stream)
@@ -105,3 +105,20 @@ class MXFaceDataset(Dataset):
 
     def __len__(self):
         return len(self.imgidx)
+
+
+class SyntheticDataset(Dataset):
+    def __init__(self, local_rank):
+        super(SyntheticDataset, self).__init__()
+        img = np.random.randint(0, 255, size=(112, 112, 3), dtype=np.int32)
+        img = np.transpose(img, (2, 0, 1))
+        img = torch.from_numpy(img).squeeze(0).float()
+        img = ((img / 255) - 0.5) / 0.5
+        self.img = img
+        self.label = 1
+
+    def __getitem__(self, index):
+        return self.img, self.label
+
+    def __len__(self):
+        return 1000000

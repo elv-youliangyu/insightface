@@ -11,6 +11,8 @@ import onnxruntime
 from .arcface_onnx import *
 from .scrfd import *
 from .landmark import *
+from .attribute import Attribute
+from ..utils import download_onnx
 
 #__all__ = ['get_model', 'get_model_list', 'get_arcface_onnx', 'get_scrfd']
 __all__ = ['get_model']
@@ -32,8 +34,11 @@ class ModelRouter:
             return ArcFaceONNX(model_file=self.onnx_file, session=session)
         elif input_shape[2]==192 and input_shape[3]==192:
             return Landmark(model_file=self.onnx_file, session=session)
+        elif input_shape[2]==96 and input_shape[3]==96:
+            return Attribute(model_file=self.onnx_file, session=session)
         else:
-            raise RuntimeError('error on model routing')
+            #raise RuntimeError('error on model routing')
+            return None
 
 def find_onnx_file(dir_path):
     if not os.path.exists(dir_path):
@@ -45,18 +50,22 @@ def find_onnx_file(dir_path):
     return paths[-1]
 
 def get_model(name, **kwargs):
-    root = kwargs.get('root', '~/.insightface/models')
+    root = kwargs.get('root', '~/.insightface')
     root = os.path.expanduser(root)
+    model_root = osp.join(root, 'models')
+    allow_download = kwargs.get('download', False)
     if not name.endswith('.onnx'):
-        model_dir = os.path.join(root, name)
+        model_dir = os.path.join(model_root, name)
         model_file = find_onnx_file(model_dir)
         if model_file is None:
             return None
     else:
         model_file = name
-    assert osp.isfile(model_file), 'model should be file'
+    if not osp.exists(model_file) and allow_download:
+        model_file = download_onnx('models', model_file, root=root)
+    assert osp.exists(model_file), 'model_file should exist'
+    assert osp.isfile(model_file), 'model_file should be file'
     router = ModelRouter(model_file)
     model = router.get_model()
-    #print('get-model for ', name,' : ', model.taskname)
     return model
 

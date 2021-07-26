@@ -30,6 +30,8 @@ try:
 except (IOError, ImportError):
     long_description = open('README.md').read()
 
+#import pypandoc
+#long_description = pypandoc.convert('README.md', 'rst')
 VERSION = find_version('insightface', '__init__.py')
 
 requirements = [
@@ -40,20 +42,29 @@ requirements = [
     'matplotlib',
     'Pillow',
     'scipy',
-    'opencv-python',
+    #'opencv-python',
     'scikit-learn',
     'scikit-image',
     'easydict',
     'cython',
+    'albumentations',
     'prettytable',
 ]
 
 extensions = [
-        Extension("insightface.thirdparty.face3d.mesh.cython.mesh_core_cython", ["insightface/thirdparty/face3d/mesh/cython/mesh_core_cython.pyx", "insightface/thirdparty/face3d/mesh/cython/mesh_core.cpp"], language='c++'),
+        Extension("insightface.thirdparty.face3d.mesh.cython.mesh_core_cython", 
+            ["insightface/thirdparty/face3d/mesh/cython/mesh_core_cython.pyx", "insightface/thirdparty/face3d/mesh/cython/mesh_core.cpp"], language='c++'),
         ]
-data_images = glob.glob('insightface/data/images/*.jpg')
+data_images = list(glob.glob('insightface/data/images/*.jpg'))
+data_images += list(glob.glob('insightface/data/images/*.png'))
 
-data_files = [ ('insightface/data/images', list(data_images)) ]
+data_mesh = list(glob.glob('insightface/thirdparty/face3d/mesh/cython/*.h'))
+data_mesh += list(glob.glob('insightface/thirdparty/face3d/mesh/cython/*.c'))
+data_mesh += list(glob.glob('insightface/thirdparty/face3d/mesh/cython/*.py*'))
+
+data_files = [ ('insightface/data/images', data_images) ]
+data_files += [ ('insightface/thirdparty/face3d/mesh/cython', data_mesh) ]
+
 ext_modules=cythonize(extensions)
 setup(
     # Metadata
@@ -62,9 +73,9 @@ setup(
     author='InsightFace Contributors',
     author_email='contact@insightface.ai',
     url='https://github.com/deepinsight/insightface',
-    description='InsightFace Toolkit',
+    description='InsightFace Python Library',
     long_description=long_description,
-    license='Apache-2.0',
+    license='MIT',
     # Package info
     packages=find_packages(exclude=('docs', 'tests', 'scripts')),
     data_files=data_files,
@@ -72,6 +83,7 @@ setup(
     include_package_data=True,
     entry_points={"console_scripts": ["insightface-cli=insightface.commands.insightface_cli:main"]},
     install_requires=requirements,
+    headers=['insightface/thirdparty/face3d/mesh/cython/mesh_core.h'],
     ext_modules=ext_modules,
     include_dirs=numpy.get_include(),
 )

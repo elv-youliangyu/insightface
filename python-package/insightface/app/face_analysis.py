@@ -12,21 +12,20 @@ import glob
 import os
 import os.path as osp
 from numpy.linalg import norm
+import onnxruntime
 from ..model_zoo import model_zoo
 from ..utils import face_align
-from ..utils import get_model_dir
+from ..utils import ensure_available
 from .common import Face
 from ..utils import DEFAULT_MP_NAME
 
 __all__ = ['FaceAnalysis']
 
-
 class FaceAnalysis:
-    def __init__(self, name=DEFAULT_MP_NAME, root='~/.insightface/models', allowed_modules=None):
+    def __init__(self, name=DEFAULT_MP_NAME, root='~/.insightface', allowed_modules=None):
+        onnxruntime.set_default_logger_severity(3)
         self.models = {}
-        #root = os.path.expanduser(root)
-        #self.model_dir = osp.join(root, name)
-        self.model_dir = get_model_dir(name, root)
+        self.model_dir = ensure_available('models', name, root=root)
         onnx_files = glob.glob(osp.join(self.model_dir, '*.onnx'))
         onnx_files = sorted(onnx_files)
         for onnx_file in onnx_files:
@@ -34,7 +33,9 @@ class FaceAnalysis:
                 #print('ignore:', onnx_file)
                 continue
             model = model_zoo.get_model(onnx_file)
-            if allowed_modules is not None and model.taskname not in allowed_modules:
+            if model is None:
+                print('model not recognized:', onnx_file)
+            elif allowed_modules is not None and model.taskname not in allowed_modules:
                 print('model ignore:', onnx_file, model.taskname)
                 del model
             elif model.taskname not in self.models and (allowed_modules is None or model.taskname in allowed_modules):
@@ -96,6 +97,9 @@ class FaceAnalysis:
                         color = (0, 255, 0)
                     cv2.circle(dimg, (kps[l][0], kps[l][1]), 1, color,
                                2)
+            if face.gender is not None and face.age is not None:
+                cv2.putText(dimg,'%s,%d'%(face.sex,face.age), (box[0]-1, box[1]-4),cv2.FONT_HERSHEY_COMPLEX,0.7,(0,255,0),1)
+
             #for key, value in face.items():
             #    if key.startswith('landmark_3d'):
             #        print(key, value.shape)
